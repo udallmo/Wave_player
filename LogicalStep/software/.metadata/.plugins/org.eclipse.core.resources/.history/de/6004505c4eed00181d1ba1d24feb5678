@@ -1,0 +1,326 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <system.h>
+#include <sys/alt_alarm.h>
+#include <io.h>
+#include "fatfs.h"
+#include "diskio.h"
+#include "ff.h"
+#include "monitor.h"
+#include "uart.h"
+#include "alt_types.h"
+#include <altera_up_avalon_audio.h>
+#include <altera_up_avalon_audio_and_video_config.h>
+#include "altera_avalon_timer_regs.h"
+#include "altera_avalon_timer.h"
+#include "altera_avalon_pio_regs.h"
+#include "sys/alt_irq.h"
+
+char songList[20][20];
+ulong songSize[20];
+volatile int action;
+volatile int trackNumber;
+volatile int playListSize;
+
+enum Playback {
+	PLAYING, PAUSED
+};
+
+//vars from phase 2
+uint32_t acc_size; /* Work register for fs command */
+uint16_t acc_files, acc_dirs;
+FILINFO Finfo;
+#if _USE_LFN
+char Lfname[512];
+#endif
+char Line[256]; /* Console input buffer */
+FATFS Fatfs[_VOLUMES]; /* File system object for each logical drive */
+FIL File1, File2; /* File objects */
+DIR Dir; /* Directory object */
+uint8_t Buff[512] __attribute__ ((aligned(4))); /* Working buffer */
+//vars from phase 2
+
+volatile int counter;
+
+static void buttonResponse(void* context, alt_u32 id) {
+
+	IOWR(BUTTON_PIO_BASE, 2, 0x0);
+
+	int button_pressed = IORD(BUTTON_PIO_BASE, 0x0);
+
+	IOWR_ALTERA_AVALON_TIMER_CONTROL(TIMER_0_BASE, 0x0005);
+
+	while (IORD_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE) != 1) {
+	}
+
+	IOWR(BUTTON_PIO_BASE, 2, 0xF);
+	IOWR(BUTTON_PIO_BASE, 3, 0x0);
+}
+
+static void timerISR(void* context, alt_u32 id) {
+
+	while (IORD_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE) != 1) {
+
+	}
+
+	IOWR_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE, 0x0);
+
+	int buttons = IORD(BUTTON_PIO_BASE, 0x0);
+
+	if (buttons == 0xE) {
+		printf("Button 0 pressed\n");
+		action = 1;
+	}
+	if (buttons == 0xD) {
+		printf("Button 1 pressed\n");
+		action = 2;
+	}
+	if (buttons == 0xB) {
+		printf("Button 2 pressed\n");
+		action = 3;
+	}
+	if (buttons == 0x7) {
+		printf("Button 3 pressed\n");
+		action = 4;
+	}
+	if (buttons == 0xF) {
+		printf("Button released\n");
+	}
+}
+
+int isWav(char *filename) {
+	char* suffix = ".WAV";
+	if (!filename || !suffix) {
+		return 0;
+	}
+	size_t lenstr = strlen(filename);
+	size_t lensuffix = strlen(suffix);
+	if (lensuffix > lenstr) {
+		return 0;
+	}
+	if (strncmp(filename + lenstr - lensuffix, suffix, lensuffix) == 0) {
+		return 1;
+	}
+	return 0;
+}
+
+static void printLCD(char *filename, char *playmode) {
+	FILE *lcd;
+	static char ch;
+	static char entry[4];
+
+	lcd = fopen("/dev/lcd_display", "w");
+
+	/* Write some simple text to the LCD. */
+	if (lcd != NULL) {
+		fprintf(lcd, "\n %s \n", playmode);
+		fprintf(lcd, "%s \n", filename);
+	}
+	fclose(lcd);
+
+	return;
+}
+
+static void play() {
+	uint32_t ofs = File1.fptr;
+	uint8_t res;
+	alt_up_audio_dev * audio_dev;
+	/* used for audio record/playback */
+	unsigned int l_buf;
+	unsigned int r_buf;
+	uint32_t s1, s2, cnt, blen = sizeof(Buff);
+	// open the Audio port
+	audio_dev = alt_up_audio_open_dev("/dev/Audio");
+
+	if (audio_dev == NULL)
+		alt_printf("Error: could not open audio device \n");
+	else
+		alt_printf("Opened audio device \n");
+	int i;
+	int SW = IORD(SWITCH_PIO_BASE, 0) & 3;
+	int mono = 0;
+	int speed;
+	speed = 1;
+	int half;
+	half = 0;
+	if (SW == 3) {
+		mono = 1;
+	} else if (SW == 2) {
+		speed = 2;
+	} else if (SW == 1) {
+		half = 1;
+	}
+
+	int p1;
+	p1 = songSize[trackNumber];
+	f_open(&File1, &songList[trackNumber], 1);
+	printf("%s : %d \n", &songList[trackNumber], p1);
+
+	while (p1) {
+		i = 0;
+		if ((uint32_t) p1 >= blen) {
+			cnt = blen;
+			p1 -= blen;
+		} else {
+			cnt = p1;
+			p1 = 0;
+		}
+		res = f_read(&File1, Buff, cnt, &s2);
+		for (i = 0; i < cnt / (4 * speed); i++) {
+			int k = 4 * i * speed;
+			l_buf = (Buff[k + 1] << 8) + (Buff[k]);
+			r_buf = (Buff[k + 3] << 8) + (Buff[k + 2]);
+
+			if (mono) {
+				r_buf = l_buf;
+			}
+
+			if (half) {
+				alt_up_audio_write_fifo(audio_dev, &(l_buf), 1,
+						ALT_UP_AUDIO_LEFT);
+				alt_up_audio_write_fifo(audio_dev, &(r_buf), 1,
+						ALT_UP_AUDIO_RIGHT);
+
+				while (!(alt_up_audio_write_fifo_space(audio_dev,
+						ALT_UP_AUDIO_LEFT)
+						&& alt_up_audio_write_fifo_space(audio_dev,
+								ALT_UP_AUDIO_RIGHT))) {
+				}
+			}
+
+			alt_up_audio_write_fifo(audio_dev, &(l_buf), 1, ALT_UP_AUDIO_LEFT);
+			alt_up_audio_write_fifo(audio_dev, &(r_buf), 1, ALT_UP_AUDIO_RIGHT);
+
+			while (!(alt_up_audio_write_fifo_space(audio_dev, ALT_UP_AUDIO_LEFT)
+					&& alt_up_audio_write_fifo_space(audio_dev,
+							ALT_UP_AUDIO_RIGHT))) {
+			}
+		}
+
+		if (res != FR_OK) {
+			break;
+		}
+	}
+	xprintf("done\n");
+}
+
+int main() {
+	enum Playback current_state;
+	trackNumber = 0;
+	int count; // for filling up the char array with strings
+	count = 0;
+//vars from phase2
+	int fifospace;
+	char *ptr, *ptr2;
+	long p1, p2, p3;
+	uint8_t res, b1, drv = 0;
+	uint16_t w1;
+	uint32_t s1, s2, cnt, blen = sizeof(Buff);
+	static const uint8_t ft[] = { 0, 12, 16, 32 };
+	uint32_t ofs = 0, sect = 0, blk[2];
+	FATFS *fs; /* Pointer to file system object */
+	alt_up_audio_dev * audio_dev;
+	/* used for audio record/playback */
+	unsigned int l_buf;
+	unsigned int r_buf;
+// open the Audio port
+	audio_dev = alt_up_audio_open_dev("/dev/Audio");
+	if (audio_dev == NULL)
+		alt_printf("Error: could not open audio device \n");
+	else
+		alt_printf("Opened audio device \n");
+
+//code starts here
+	res = disk_initialize((uint8_t ) 0);
+	printf("disk init %d \n", res);
+	res = f_mount((uint8_t) 0, &Fatfs[0]);
+	printf("file init %d \n", res);
+	res = f_opendir(&Dir, 0);
+	printf("file open %d \n", res);
+
+	p1 = s1 = s2 = 0; // otherwise initialize the pointers and proceed.
+	for (;;) {
+		res = f_readdir(&Dir, &Finfo);
+		if ((res != FR_OK) || !Finfo.fname[0])
+			break;
+		if (Finfo.fattrib & AM_DIR) {
+			s2++;
+		} else {
+			s1++;
+			p1 += Finfo.fsize;
+		}
+		if (isWav(&(Finfo.fname[0])) == 1) {
+			strcpy(songList[count], &Finfo.fname[0]);
+			songSize[count] = Finfo.fsize;
+			xprintf(" \%9lu  %s \n", songSize[count], &songList[count]);
+			count++;
+		}
+
+	}
+
+	playListSize = count - 1;
+	counter = 0;
+	action = 0;
+	current_state = PAUSED;
+	alt_irq_register(BUTTON_PIO_IRQ, (void*) 0, buttonResponse);
+	alt_irq_register(TIMER_0_IRQ, (void*) 0, timerISR);
+
+	IOWR_ALTERA_AVALON_TIMER_CONTROL(TIMER_0_BASE, 0x0003);
+	IOWR_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE, 0x0000);
+	IOWR_ALTERA_AVALON_TIMER_PERIODL(TIMER_0_BASE, 4000);
+	IOWR_ALTERA_AVALON_TIMER_PERIODH(TIMER_0_BASE, 500);
+
+	IOWR(BUTTON_PIO_BASE, 2, 0x0F);
+	IOWR(BUTTON_PIO_BASE, 3, 0x0);
+
+	while (1) { //Main Loop
+		switch (action) {
+		//NEXT
+		case 1:
+			printf("next \n");
+			trackNumber++;
+			if (trackNumber > playListSize) {
+				trackNumber = 0;
+			}
+			action = 0;
+			break;
+
+			//PLAY/PAUSE
+		case 2:
+			switch (current_state) {
+			case PAUSED:
+				printf("track is now playing \n");
+				current_state = PLAYING;
+				play();
+				break;
+			case PLAYING:
+				printf("track is now paused \n");
+				current_state = PAUSED;
+				break;
+			}
+			printf("play/pause");
+			action = 0;
+			break;
+			//STOP
+		case 3:
+			printf("stop \n");
+			action = 0;
+			break;
+			//PREVIOUS
+		case 4:
+			printf("previous \n");
+			trackNumber--;
+			if (trackNumber < 0) {
+				trackNumber = playListSize;
+			}
+			action = 0;
+			break;
+		default:
+			break;
+		}
+
+	}
+	return 0;
+}

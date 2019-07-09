@@ -1,0 +1,6 @@
+11:14:18 **** Clean-only build of configuration Nios II for project Lab2_PButtons_bsp ****
+make clean 
+[BSP clean complete]
+
+11:14:19 Build Finished (took 1s.119ms)
+

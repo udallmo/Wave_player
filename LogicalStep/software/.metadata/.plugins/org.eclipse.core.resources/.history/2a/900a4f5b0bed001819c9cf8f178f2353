@@ -1,0 +1,178 @@
+/*=========================================================================*/
+/*  Includes                                                               */
+/*=========================================================================*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+#include <system.h>
+#include <sys/alt_alarm.h>
+#include <io.h>
+
+#include "fatfs.h"
+#include "diskio.h"
+
+#include "ff.h"
+#include "monitor.h"
+#include "uart.h"
+
+#include "alt_types.h"
+
+#include <altera_up_avalon_audio_and_video_config.h>
+#include "altera_avalon_timer_regs.h"
+#include "altera_avalon_timer.h"
+#include "altera_up_avalon_audio.h"
+
+#define HALF_SPEED 1
+#define DOUBLE_SPEED 2
+#define MONO 3
+
+FATFS Fatfs[_VOLUMES]; /* File system object for each logical drive */
+uint8_t Buff[256] __attribute__ ((aligned(4))); /* Working buffer */
+
+int isWav(char *filename);
+void song_index();
+void display();
+
+static void button_irq(void *context, alt_u32 id) {
+	IOWR(BUTTON_PIO_BASE, 2, 0);
+
+	IOWR_ALTERA_AVALON_TIMER_CONTROL(TIMER_0_BASE, 0x0005);
+
+	alt_u8 buttons;
+	buttons = IORD(BUTTON_PIO_BASE, 3) & 0x0F;
+	IOWR(LED_PIO_BASE, 0, 0x0F);
+
+	if (buttons == 0x01) {
+		printf("1");
+	} else if (buttons == 0x02) {
+		printf("2");
+	} else if (buttons == 0x04) {
+		printf("3");
+	} else if (buttons == 0x08) {
+		printf("4");
+	}
+
+	IOWR(BUTTON_PIO_BASE, 2, 0x0F);
+	IOWR(BUTTON_PIO_BASE, 3, 0);
+	IOWR(LED_PIO_BASE, 0, 0);
+}
+
+static void timer_irq(void *context, alt_u32 id) {
+	while (IORD_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE) != 1) {
+	};
+	IOWR_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE, 0);
+}
+
+int main() {
+	char *ptr, *ptr2;
+	long p1, p2, p3;
+	uint8_t res, b1, drv = 0;
+	uint16_t w1;
+	uint32_t s1, s2, cnt, blen = sizeof(Buff);
+	alt_up_audio_dev * audio_dev;
+
+	unsigned int l_buf;
+	unsigned int r_buf;
+	// open the Audio port
+	audio_dev = alt_up_audio_open_dev("/dev/Audio");
+	FILINFO Finfo;
+	DIR Dir; /* Directory object */
+
+	//initialization
+	IOWR_ALTERA_AVALON_TIMER_CONTROL(TIMER_0_BASE, 0x0003);
+	IOWR_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE, 0);
+	IOWR_ALTERA_AVALON_TIMER_PERIODL(TIMER_0_BASE, 5000);
+	IOWR_ALTERA_AVALON_TIMER_PERIODH(TIMER_0_BASE, 0);
+
+	IOWR(BUTTON_PIO_BASE, 2, 0x0F);
+	IOWR(BUTTON_PIO_BASE, 3, 0);
+
+	alt_irq_register(BUTTON_PIO_IRQ, (void*) 0, button_irq);
+	alt_irq_register(TIMER_0_IRQ, (void*) 0, timer_irq);
+
+	// Open directory and find files
+	disk_initialize((uint8_t ) 0);
+	f_mount((uint8_t) 0, &Fatfs[0]);
+
+	while (*ptr == ' ')
+		ptr++;
+	res = f_opendir(&Dir, ptr);
+	p1 = s1 = s2 = 0; // otherwise initialize the pointers and proceed.
+	for (;;) {
+		res = f_readdir(&Dir, &Finfo);
+		if ((res != FR_OK) || !Finfo.fname[0])
+			break;
+		if (Finfo.fattrib & AM_DIR) {
+			s2++;
+		} else {
+			s1++;
+			p1 += Finfo.fsize;
+		}
+		xprintf("%9lu  %s\n",
+				Finfo.fsize, &(Finfo.fname[0]));
+	}
+
+	// Determine which are wav
+
+	// display name
+	//set to stop
+
+	while (1) {
+//		int mono = 0;
+//		char* playmode;
+//
+//		switch_state = IORD(SWITCH_PIO_BASE, 0) & 0x0F;
+//
+//		switch (switch_state)
+//		{
+//		case HALF_SPEED:
+//			adder = 2;
+//			break;
+//		case DOUBLE_SPEED:
+//			adder = 8;
+//			break;
+//		case MONO:
+//			mono = 1;
+//			break;
+//		default:
+//			adder = 4;
+//			break;
+//		}
+//
+//		play(adder, mono);
+	}
+}
+
+//void play(int adder, int mono)
+//{
+//	alt_up_audio_dev * audio_dev;
+//	unsigned int l_buf;
+//	unsigned int r_buf;
+//
+//	audio_dev = alt_up_audio_open_dev("/dev/Audio");
+//
+//	int i;
+//	for (i = 0; i < 512; i += adder)
+//	{
+//		l_buf = Buff[i + 1] << 8 | Buff[i];
+//		r_buf = (mono !=1) ? Buff[i + 3] << 8 | Buff[i + 2]: l_buf;
+//
+//		while (alt_up_audio_write_fifo_space(audio_dev,ALT_UP_AUDIO_RIGHT) < 1);
+//
+//		alt_up_audio_write_fifo(audio_dev, &(r_buf), 1, ALT_UP_AUDIO_RIGHT);
+//		alt_up_audio_write_fifo(audio_dev, &(l_buf), 1, ALT_UP_AUDIO_LEFT);
+//	}
+//}
+
+//int isWav(char* filename){
+//
+//};
+//
+//void displayLCD(char* filename, char* playmode){
+//	FILE *lcd;
+//	lcd = fopen("/dev/lcd_display", "w");
+//	fprintf(lcd,"%s\n%s", filename, playmode);
+//	fclose(lcd);
+//}
